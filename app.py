@@ -536,6 +536,127 @@ Log y-axis keeps both prefill (large) and decode (small) visible simultaneously.
             .style.format({"Start (s)": "{:.3f}", "Duration (ms)": "{:.1f}"}),
             use_container_width=True, height=300)
 
+    # ── Per-token timeline ────────────────────────────────────────────────────
+    st.subheader(f"Per-Token Timeline — '{selected}'")
+    st.markdown(
+        "Each decode forward pass generates **exactly one token** per request in the batch. "
+        "The charts below show the **actual inter-token arrival time** and **GPU duration** "
+        "for every token, derived from the forward-pass traces."
+    )
+
+    token_frames = []
+    for label in MODELS:
+        s = join_df[(join_df["model_label"] == label) &
+                    (join_df["prompt_id"] == selected)].sort_values("rel_start_s")
+        if len(s) < 2:
+            continue
+        decode_passes = s.iloc[1:].copy()
+        decode_passes["token_idx"] = range(1, len(decode_passes) + 1)
+        starts = s["rel_start_s"].values
+        decode_passes["inter_token_ms"] = np.diff(starts) * 1000
+        decode_passes["model_label"] = label
+        token_frames.append(decode_passes)
+
+    if token_frames:
+        tok_df = pd.concat(token_frames, ignore_index=True)
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fig = go.Figure()
+            for label in MODELS:
+                t = tok_df[tok_df["model_label"] == label]
+                if t.empty:
+                    continue
+                avg_itt = t["inter_token_ms"].mean()
+                fig.add_trace(go.Scatter(
+                    x=t["token_idx"], y=t["inter_token_ms"],
+                    mode="lines+markers", name=label,
+                    line=dict(color=COLORS[label], width=1.5),
+                    marker=dict(color=COLORS[label], size=4),
+                    customdata=list(zip(t["fwd_id"], t["batch_size"], t["duration_ms"].round(1))),
+                    hovertemplate="<b>" + label + "</b><br>"
+                                  "Token #%{x}<br>"
+                                  "Inter-token: %{y:.2f} ms<br>"
+                                  "GPU duration: %{customdata[2]} ms<br>"
+                                  "Batch size: %{customdata[1]}<br>"
+                                  "fwd_id: %{customdata[0]}<extra></extra>"))
+                fig.add_hline(y=avg_itt, line_dash="dash", line_color=COLORS[label], line_width=1,
+                              annotation_text=f"{label} avg: {avg_itt:.1f} ms",
+                              annotation_position="right",
+                              annotation_font_color=COLORS[label])
+            fig.update_layout(
+                xaxis_title="Output Token #",
+                yaxis_title="Inter-Token Time (ms)",
+                height=400,
+                title="Wall-Clock Time Between Consecutive Tokens",
+                legend=dict(x=.01, y=.99))
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col_b:
+            fig = go.Figure()
+            for label in MODELS:
+                t = tok_df[tok_df["model_label"] == label]
+                if t.empty:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=t["token_idx"], y=t["duration_ms"],
+                    mode="lines+markers", name=label,
+                    line=dict(color=COLORS[label], width=1.5),
+                    marker=dict(color=COLORS[label], size=4),
+                    customdata=list(zip(t["fwd_id"], t["batch_size"],
+                                        t["inter_token_ms"].round(2))),
+                    hovertemplate="<b>" + label + "</b><br>"
+                                  "Token #%{x}<br>"
+                                  "GPU duration: %{y:.2f} ms<br>"
+                                  "Inter-token: %{customdata[2]} ms<br>"
+                                  "Batch size: %{customdata[1]}<br>"
+                                  "fwd_id: %{customdata[0]}<extra></extra>"))
+            fig.update_layout(
+                xaxis_title="Output Token #",
+                yaxis_title="GPU Forward Pass Duration (ms)",
+                height=400,
+                title="GPU Time to Generate Each Token",
+                legend=dict(x=.01, y=.99))
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Batch size per token
+        fig = go.Figure()
+        for label in MODELS:
+            t = tok_df[tok_df["model_label"] == label]
+            if t.empty:
+                continue
+            fig.add_trace(go.Bar(
+                x=t["token_idx"], y=t["batch_size"], name=label,
+                marker_color=COLORS[label], opacity=.65))
+        fig.update_layout(
+            barmode="group",
+            xaxis_title="Output Token #",
+            yaxis_title="Batch Size (concurrent requests)",
+            height=300,
+            title="How Many Other Requests Shared Each Decode Pass",
+            legend=dict(x=.01, y=.99))
+        st.plotly_chart(fig, use_container_width=True)
+
+        _note("""
+**Left chart — Inter-Token Time** (wall-clock gap between consecutive tokens):
+- This is the **actual TPOT per token** as experienced by a streaming user.
+- The dashed horizontal line is the average (which matches the request-level `tpot_ms`).
+- **Spikes** indicate tokens where the GPU was busy with other work (e.g., a new prefill for another request arriving mid-decode, or batch size change).
+- A flat, low line means smooth, consistent streaming.
+
+**Right chart — GPU Duration** per decode forward pass:
+- This is how long the GPU spent on the specific forward pass that generated this token.
+- It differs from inter-token time because inter-token includes scheduler overhead between passes.
+- **Jumps correlate with batch size changes** — larger batches take longer per pass.
+
+**Bottom chart — Batch Size** per token:
+- Shows how many requests were batched together when each token was generated.
+- A rising batch size mid-decode means new requests arrived and the scheduler added them to the batch — this is continuous batching in action.
+- When batch size drops, requests have completed and left the batch.
+""")
+    else:
+        st.info("Not enough forward passes for this prompt to build a per-token timeline.")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tab 4 — Batching & Throughput
