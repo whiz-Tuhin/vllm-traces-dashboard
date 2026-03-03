@@ -48,9 +48,8 @@ def _ols(x: pd.Series, y: pd.Series, n=200):
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 MODES = {
-    "Streaming (Per-Token)": {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
-    "Streaming":             {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
-    "Non-Streaming":         {"base": TRACES_DIR,               "suffix": ""},
+    "Streaming":     {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
+    "Non-Streaming": {"base": TRACES_DIR,               "suffix": ""},
 }
 
 @st.cache_data
@@ -143,15 +142,13 @@ with mode_col:
         horizontal=True,
     )
 with info_col:
-    if mode == "Streaming (Per-Token)":
-        st.info("**Per-Token** — real inter-token latency (ITL) recorded for every generated token.", icon="🔬")
-    elif mode == "Streaming":
-        st.info("**Streaming** — TTFT and TPOT measured from per-token stream events.", icon="📡")
+    if mode == "Streaming":
+        st.info("**Streaming** — real per-token ITL, TTFT, and TPOT from stream events.", icon="📡")
     else:
         st.warning("**Non-Streaming** — `first_token_ts ≈ completion_ts`; decode from fwd-pass traces.", icon="📦")
 
-is_streaming   = mode in ("Streaming", "Streaming (Per-Token)")
-has_per_token  = mode == "Streaming (Per-Token)"
+is_streaming  = mode == "Streaming"
+has_per_token = is_streaming
 req_df, fwd_df, join_df = load_data(mode)
 tok_df = load_per_token() if has_per_token else None
 
@@ -785,79 +782,7 @@ The gap between the ITL line and the crosses is scheduler + Python overhead betw
 """)
 
     else:
-        # ── DERIVED per-token from forward passes (fallback) ──────────────
-        st.markdown(
-            "Derived from forward-pass traces (each decode pass = one token). "
-            "Switch to **Streaming (Per-Token)** mode for real per-token timestamps."
-        )
-
-        token_frames = []
-        for label in MODELS:
-            s = join_df[(join_df["model_label"] == label) &
-                        (join_df["prompt_id"] == selected)].sort_values("rel_start_s")
-            if len(s) < 2:
-                continue
-            decode_passes = s.iloc[1:].copy()
-            decode_passes["token_idx"] = range(1, len(decode_passes) + 1)
-            starts = s["rel_start_s"].values
-            decode_passes["inter_token_ms"] = np.diff(starts) * 1000
-            decode_passes["model_label"] = label
-            token_frames.append(decode_passes)
-
-        if token_frames:
-            derived_tok = pd.concat(token_frames, ignore_index=True)
-
-            col_a, col_b = st.columns(2)
-            with col_a:
-                fig = go.Figure()
-                for label in MODELS:
-                    t = derived_tok[derived_tok["model_label"] == label]
-                    if t.empty:
-                        continue
-                    avg_itt = t["inter_token_ms"].mean()
-                    fig.add_trace(go.Scatter(
-                        x=t["token_idx"], y=t["inter_token_ms"],
-                        mode="lines+markers", name=label,
-                        line=dict(color=COLORS[label], width=1.5),
-                        marker=dict(color=COLORS[label], size=4),
-                        customdata=list(zip(t["fwd_id"], t["batch_size"], t["duration_ms"].round(1))),
-                        hovertemplate="<b>" + label + "</b><br>Token #%{x}<br>"
-                                      "Inter-token: %{y:.2f} ms<br>GPU: %{customdata[2]} ms<br>"
-                                      "Batch: %{customdata[1]}<br>fwd_id: %{customdata[0]}<extra></extra>"))
-                    fig.add_hline(y=avg_itt, line_dash="dash", line_color=COLORS[label], line_width=1,
-                                  annotation_text=f"avg: {avg_itt:.1f} ms",
-                                  annotation_position="right",
-                                  annotation_font_color=COLORS[label])
-                fig.update_layout(xaxis_title="Output Token #", yaxis_title="Inter-Token Time (ms)",
-                                  height=400, title="Wall-Clock Gap Between Tokens (from fwd passes)",
-                                  legend=dict(x=.01, y=.99))
-                st.plotly_chart(fig, use_container_width=True)
-
-            with col_b:
-                fig = go.Figure()
-                for label in MODELS:
-                    t = derived_tok[derived_tok["model_label"] == label]
-                    if t.empty:
-                        continue
-                    fig.add_trace(go.Scatter(
-                        x=t["token_idx"], y=t["duration_ms"],
-                        mode="lines+markers", name=label,
-                        line=dict(color=COLORS[label], width=1.5),
-                        marker=dict(color=COLORS[label], size=4),
-                        hovertemplate="<b>" + label + "</b><br>Token #%{x}<br>"
-                                      "GPU: %{y:.2f} ms<extra></extra>"))
-                fig.update_layout(xaxis_title="Output Token #", yaxis_title="GPU Duration (ms)",
-                                  height=400, title="GPU Time per Decode Pass",
-                                  legend=dict(x=.01, y=.99))
-                st.plotly_chart(fig, use_container_width=True)
-
-            _note("""
-**Left**: wall-clock inter-token time derived from forward-pass start times.
-**Right**: GPU duration of each decode forward pass.
-Switch to **Streaming (Per-Token)** mode for real per-token timestamps from the client.
-""")
-        else:
-            st.info("Not enough forward passes for this prompt to build a per-token timeline.")
+        st.info("Per-token timeline is available in **Streaming** mode. Switch using the radio button above.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
