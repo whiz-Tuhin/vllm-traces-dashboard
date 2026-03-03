@@ -910,9 +910,8 @@ with tab_tl:
                 barmode="stack",
                 xaxis_title="Time since request start (ms)",
                 yaxis=dict(categoryorder="array", categoryarray=lanes),
-                height=300,
-                margin=dict(l=80, r=20, t=40, b=50),
-                title=dict(text=label, font=dict(size=14)),
+                height=280,
+                margin=dict(l=80, r=20, t=10, b=50),
                 showlegend=False,
             )
 
@@ -927,8 +926,14 @@ with tab_tl:
             }
             return fig, metrics
 
-        col_l, col_r = st.columns(2)
+        col_l, col_div, col_r = st.columns([20, 1, 20])
         model_list = list(MODELS.keys())
+
+        with col_div:
+            st.markdown(
+                "<div style='border-left:2px solid #444; height:420px; margin:auto;'></div>",
+                unsafe_allow_html=True,
+            )
 
         for col, label in zip([col_l, col_r], model_list):
             with col:
@@ -936,9 +941,22 @@ with tab_tl:
                 if fig is None:
                     st.warning(f"No data for {label} / {tl_selected}")
                     continue
-                mc = st.columns(len(metrics))
-                for i, (k, v) in enumerate(metrics.items()):
-                    mc[i].metric(k, v)
+                color = COLORS[label]
+                st.markdown(
+                    f"<h3 style='margin-bottom:0; color:{color};'>{label}</h3>",
+                    unsafe_allow_html=True,
+                )
+                metric_html = "".join(
+                    f"<span style='margin-right:18px;'>"
+                    f"<span style='color:#999; font-size:0.78rem;'>{k}</span><br>"
+                    f"<span style='font-size:1.05rem; font-weight:600;'>{v}</span>"
+                    f"</span>"
+                    for k, v in metrics.items()
+                )
+                st.markdown(
+                    f"<div style='display:flex; flex-wrap:wrap; gap:4px 0; margin:4px 0 10px;'>{metric_html}</div>",
+                    unsafe_allow_html=True,
+                )
                 st.plotly_chart(fig, use_container_width=True)
 
         # Colour legend
