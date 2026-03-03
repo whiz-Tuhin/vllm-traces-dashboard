@@ -46,6 +46,149 @@ def _ols(x: pd.Series, y: pd.Series, n=200):
     return xf, np.polyval(c, xf)
 
 
+def _build_perfetto_json(label, rdf, jdf, tdf):
+    """Convert traces for one model into Chrome Trace Event Format (list of dicts).
+
+    Perfetto layout:
+      - Each request is a separate "process" (pid).
+      - tid 1 = Phases (Scheduling / Prefill / Decode)
+      - tid 2 = Forward Passes
+      - tid 3 = Token arrivals (instant events)
+    """
+    model_reqs = rdf[rdf["model_label"] == label].sort_values("api_receive_ts")
+    if model_reqs.empty:
+        return []
+
+    global_t0 = model_reqs["api_receive_ts"].min()
+    events = []
+
+    def _us(ts):
+        return (ts - global_t0) * 1_000_000
+
+    for pid_idx, (_, req) in enumerate(model_reqs.iterrows()):
+        rid = req["request_id"]
+        pid = pid_idx + 1
+
+        events.append({"ph": "M", "pid": pid, "tid": 0,
+                        "name": "process_name",
+                        "args": {"name": f"{req['prompt_id']} ({rid})"}})
+        events.append({"ph": "M", "pid": pid, "tid": 1,
+                        "name": "thread_name", "args": {"name": "Phases"}})
+        events.append({"ph": "M", "pid": pid, "tid": 2,
+                        "name": "thread_name", "args": {"name": "Fwd Passes"}})
+        events.append({"ph": "M", "pid": pid, "tid": 3,
+                        "name": "thread_name", "args": {"name": "Tokens"}})
+
+        sched_ts  = _us(req["api_receive_ts"])
+        engine_ts = _us(req["engine_add_request_ts"])
+        first_ts  = _us(req["first_token_ts"])
+        comp_ts   = _us(req["completion_ts"])
+
+        events.append({"ph": "X", "pid": pid, "tid": 1, "name": "Scheduling",
+                        "ts": sched_ts,  "dur": engine_ts - sched_ts,  "cat": "phase"})
+        events.append({"ph": "X", "pid": pid, "tid": 1, "name": "Prefill",
+                        "ts": engine_ts, "dur": first_ts - engine_ts,  "cat": "phase"})
+        events.append({"ph": "X", "pid": pid, "tid": 1, "name": "Decode",
+                        "ts": first_ts,  "dur": comp_ts - first_ts,   "cat": "phase"})
+
+        # Forward passes for this request
+        if jdf is not None:
+            req_fwd = jdf[(jdf["model_label"] == label) &
+                          (jdf["request_id"] == rid)].sort_values("rel_start_s")
+            for i, (_, fw) in enumerate(req_fwd.iterrows()):
+                fwd_ts  = (fw["rel_start_s"]) * 1_000_000
+                fwd_dur = fw["duration_ms"] * 1_000
+                events.append({
+                    "ph": "X", "pid": pid, "tid": 2,
+                    "name": "Prefill fwd" if i == 0 else f"Decode fwd {i}",
+                    "ts": fwd_ts, "dur": fwd_dur, "cat": "fwd",
+                    "args": {"fwd_id": int(fw["fwd_id"]),
+                             "batch_size": int(fw["batch_size"]),
+                             "tokens_in_pass": int(fw["tokens_in_pass"])}
+                })
+
+        # Per-token instants
+        if tdf is not None:
+            req_tok = tdf[(tdf["model_label"] == label) &
+                          (tdf["request_id"] == rid)].sort_values("token_idx")
+            for _, tk in req_tok.iterrows():
+                tok_ts = _us(tk["timestamp"])
+                events.append({
+                    "ph": "i", "pid": pid, "tid": 3, "s": "t",
+                    "name": f"tok_{int(tk['token_idx'])}",
+                    "ts": tok_ts, "cat": "token",
+                    "args": {"token_idx": int(tk["token_idx"]),
+                             "itl_ms": round(tk["itl_ms"], 2)}
+                })
+
+    return events
+
+
+def _parse_uploaded_perfetto(data):
+    """Parse an uploaded Perfetto JSON and extract request-level metrics.
+
+    Returns a list of dicts, one per request/process found in the trace:
+      {prompt_id, scheduling_us, prefill_us, decode_us, e2e_us, tokens, itl_list}
+    """
+    if isinstance(data, dict):
+        events = data.get("traceEvents", [])
+    else:
+        events = data
+
+    procs = {}
+    for ev in events:
+        pid = ev.get("pid")
+        if pid is None:
+            continue
+        if pid not in procs:
+            procs[pid] = {"phases": [], "tokens": [], "fwd": [], "name": ""}
+        if ev.get("ph") == "M" and ev.get("name") == "process_name":
+            procs[pid]["name"] = ev.get("args", {}).get("name", "")
+        elif ev.get("ph") == "X" and ev.get("cat") == "phase":
+            procs[pid]["phases"].append(ev)
+        elif ev.get("ph") == "i" and ev.get("cat") == "token":
+            procs[pid]["tokens"].append(ev)
+        elif ev.get("ph") == "X" and ev.get("cat") == "fwd":
+            procs[pid]["fwd"].append(ev)
+
+    results = []
+    for pid, info in sorted(procs.items()):
+        if not info["phases"]:
+            continue
+
+        phases_by_name = {p["name"]: p for p in info["phases"]}
+        sched  = phases_by_name.get("Scheduling", {})
+        prefill = phases_by_name.get("Prefill", {})
+        decode  = phases_by_name.get("Decode", {})
+
+        sched_dur   = sched.get("dur", 0)
+        prefill_dur = prefill.get("dur", 0)
+        decode_dur  = decode.get("dur", 0)
+        e2e_us      = sched_dur + prefill_dur + decode_dur
+
+        itl_list = sorted(
+            [(t.get("args", {}).get("token_idx", 0), t.get("args", {}).get("itl_ms", 0))
+             for t in info["tokens"]],
+            key=lambda x: x[0]
+        )
+        decode_itls = [itl for idx, itl in itl_list if idx > 0]
+
+        results.append({
+            "prompt_id":     info["name"],
+            "scheduling_ms": sched_dur / 1000,
+            "prefill_ms":    prefill_dur / 1000,
+            "ttft_ms":       (sched_dur + prefill_dur) / 1000,
+            "decode_ms":     decode_dur / 1000,
+            "e2e_ms":        e2e_us / 1000,
+            "tokens":        len(info["tokens"]),
+            "median_itl_ms": float(np.median(decode_itls)) if decode_itls else 0,
+            "p95_itl_ms":    float(np.percentile(decode_itls, 95)) if decode_itls else 0,
+            "fwd_passes":    len(info["fwd"]),
+            "itl_list":      decode_itls,
+        })
+    return results
+
+
 # ── Data loading ─────────────────────────────────────────────────────────────
 MODES = {
     "Streaming":     {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
@@ -159,9 +302,10 @@ tab_names = [
     "Token Timeline",
     "Batching & Throughput",
     "Sanity Checks",
+    "Export / Compare",
     "Raw Data",
 ]
-tab1, tab2, tab3, tab_tl, tab4, tab5, tab6 = st.tabs(tab_names)
+tab1, tab2, tab3, tab_tl, tab4, tab5, tab_ec, tab6 = st.tabs(tab_names)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1174,6 +1318,191 @@ Any significant offset would suggest the instrumentation is losing time somewher
 Points **below the y = x line** are expected: GPU time < wall-clock time because
 there is scheduler overhead *between* decode passes (request selection, memory management, etc.).
 The vertical gap is the aggregate inter-pass scheduling cost per request.
+""")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Export / Compare Tab
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_ec:
+    st.subheader("Export Traces as Perfetto JSON")
+    st.markdown(
+        "Download trace data in [Chrome Trace Event Format](https://chromium.googlesource.com/catapult/+/HEAD/docs/trace-event-format.md) "
+        "— open directly in [Perfetto UI](https://ui.perfetto.dev/) for detailed inspection."
+    )
+
+    if not has_per_token:
+        st.warning("Switch to **Streaming** mode for per-token data in the export.")
+
+    # ── Export section ────────────────────────────────────────────────────
+    exp_choice = st.radio("Export scope", ["Both models (combined)", *list(MODELS.keys())],
+                          horizontal=True, key="exp_scope")
+
+    if exp_choice == "Both models (combined)":
+        labels_to_export = list(MODELS.keys())
+    else:
+        labels_to_export = [exp_choice]
+
+    all_events = []
+    pid_offset = 0
+    for lbl in labels_to_export:
+        evts = _build_perfetto_json(lbl, req_df, join_df, tok_df)
+        if len(labels_to_export) > 1 and pid_offset > 0:
+            max_pid = max((e.get("pid", 0) for e in evts), default=0)
+            for e in evts:
+                if "pid" in e:
+                    e["pid"] += pid_offset
+            pid_offset += max_pid + 1
+        else:
+            if evts:
+                pid_offset = max((e.get("pid", 0) for e in evts), default=0) + 1
+        all_events.extend(evts)
+
+    n_reqs   = len(set(e.get("pid") for e in all_events if e.get("ph") != "M"))
+    n_phases = sum(1 for e in all_events if e.get("cat") == "phase")
+    n_fwd    = sum(1 for e in all_events if e.get("cat") == "fwd")
+    n_tok    = sum(1 for e in all_events if e.get("cat") == "token")
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Requests", n_reqs)
+    mc2.metric("Phase events", n_phases)
+    mc3.metric("Fwd pass events", n_fwd)
+    mc4.metric("Token events", n_tok)
+
+    perfetto_payload = json.dumps({"traceEvents": all_events}, separators=(",", ":"))
+    fname = "vllm_traces_" + "_".join(l.replace(" ", "_") for l in labels_to_export) + ".json"
+    st.download_button(
+        "Download Perfetto JSON",
+        data=perfetto_payload.encode(),
+        file_name=fname,
+        mime="application/json",
+    )
+
+    st.divider()
+
+    # ── Compare section ───────────────────────────────────────────────────
+    st.subheader("Compare: Upload a Perfetto JSON")
+    st.markdown(
+        "Upload a Perfetto JSON (e.g. from a MIST run or another vLLM config) to compare "
+        "against the current traces side by side."
+    )
+
+    uploaded = st.file_uploader("Upload Perfetto JSON", type=["json"], key="perf_upload")
+    if uploaded is not None:
+        try:
+            uploaded_data = json.loads(uploaded.read())
+        except json.JSONDecodeError:
+            st.error("Invalid JSON file. Please upload a valid Perfetto trace JSON.")
+            uploaded_data = None
+
+        if uploaded_data is not None:
+            uploaded_reqs = _parse_uploaded_perfetto(uploaded_data)
+            if not uploaded_reqs:
+                st.warning("No request data found in the uploaded trace. "
+                           "Expected Chrome Trace Event Format with phase/token events.")
+            else:
+                compare_model = st.selectbox("Compare against", list(MODELS.keys()), key="cmp_model")
+
+                # Build baseline metrics from current traces
+                base_reqs = req_df[req_df["model_label"] == compare_model].copy()
+                base_decode_itls = []
+                if tok_df is not None:
+                    for _, br in base_reqs.iterrows():
+                        rt = tok_df[(tok_df["model_label"] == compare_model) &
+                                    (tok_df["request_id"] == br["request_id"])]
+                        itls = rt[rt["token_idx"] > 0]["itl_ms"].tolist()
+                        base_decode_itls.extend(itls)
+
+                udf = pd.DataFrame(uploaded_reqs)
+
+                # Summary comparison
+                st.markdown("#### Aggregate Comparison")
+                cmp_data = {
+                    "Metric": ["Requests", "Median TTFT (ms)", "Median E2E (ms)",
+                               "Median ITL (ms)", "p95 ITL (ms)", "Avg Tokens"],
+                    f"{compare_model} (baseline)": [
+                        len(base_reqs),
+                        f"{base_reqs['ttft_ms'].median():.1f}" if not base_reqs.empty else "–",
+                        f"{base_reqs['total_latency_ms'].median():.1f}" if not base_reqs.empty else "–",
+                        f"{np.median(base_decode_itls):.1f}" if base_decode_itls else "–",
+                        f"{np.percentile(base_decode_itls, 95):.1f}" if base_decode_itls else "–",
+                        f"{base_reqs['output_tokens'].mean():.0f}" if not base_reqs.empty else "–",
+                    ],
+                    "Uploaded trace": [
+                        len(udf),
+                        f"{udf['ttft_ms'].median():.1f}" if not udf.empty else "–",
+                        f"{udf['e2e_ms'].median():.1f}" if not udf.empty else "–",
+                        f"{udf['median_itl_ms'].median():.1f}" if not udf.empty else "–",
+                        f"{udf['p95_itl_ms'].median():.1f}" if not udf.empty else "–",
+                        f"{udf['tokens'].mean():.0f}" if not udf.empty else "–",
+                    ],
+                }
+                st.dataframe(pd.DataFrame(cmp_data), use_container_width=True, hide_index=True)
+
+                # Per-request comparison chart: E2E latency
+                st.markdown("#### E2E Latency Distribution")
+                fig_cmp = go.Figure()
+                if not base_reqs.empty:
+                    fig_cmp.add_trace(go.Histogram(
+                        x=base_reqs["total_latency_ms"], name=f"{compare_model} (baseline)",
+                        opacity=0.7, marker_color=COLORS[compare_model]))
+                if not udf.empty:
+                    fig_cmp.add_trace(go.Histogram(
+                        x=udf["e2e_ms"], name="Uploaded",
+                        opacity=0.7, marker_color="#17BECF"))
+                fig_cmp.update_layout(
+                    barmode="overlay", xaxis_title="E2E Latency (ms)",
+                    yaxis_title="Count", height=350,
+                    margin=dict(l=60, r=20, t=30, b=50))
+                st.plotly_chart(fig_cmp, use_container_width=True)
+
+                # ITL distribution comparison
+                if base_decode_itls and not udf.empty:
+                    all_uploaded_itls = []
+                    for itls in udf["itl_list"]:
+                        all_uploaded_itls.extend(itls)
+
+                    if all_uploaded_itls:
+                        st.markdown("#### Inter-Token Latency Distribution")
+                        fig_itl = go.Figure()
+                        fig_itl.add_trace(go.Histogram(
+                            x=base_decode_itls, name=f"{compare_model} (baseline)",
+                            opacity=0.7, marker_color=COLORS[compare_model]))
+                        fig_itl.add_trace(go.Histogram(
+                            x=all_uploaded_itls, name="Uploaded",
+                            opacity=0.7, marker_color="#17BECF"))
+                        fig_itl.update_layout(
+                            barmode="overlay", xaxis_title="ITL (ms)",
+                            yaxis_title="Count", height=350,
+                            margin=dict(l=60, r=20, t=30, b=50))
+                        st.plotly_chart(fig_itl, use_container_width=True)
+
+                # TTFT distribution comparison
+                st.markdown("#### TTFT Distribution")
+                fig_ttft = go.Figure()
+                if not base_reqs.empty:
+                    fig_ttft.add_trace(go.Histogram(
+                        x=base_reqs["ttft_ms"], name=f"{compare_model} (baseline)",
+                        opacity=0.7, marker_color=COLORS[compare_model]))
+                if not udf.empty:
+                    fig_ttft.add_trace(go.Histogram(
+                        x=udf["ttft_ms"], name="Uploaded",
+                        opacity=0.7, marker_color="#17BECF"))
+                fig_ttft.update_layout(
+                    barmode="overlay", xaxis_title="TTFT (ms)",
+                    yaxis_title="Count", height=350,
+                    margin=dict(l=60, r=20, t=30, b=50))
+                st.plotly_chart(fig_ttft, use_container_width=True)
+
+                _note("""
+**Comparison guide:**
+
+- **Aggregate table** — median metrics across all requests. Lower is better for latency metrics.
+- **E2E Latency** — overlapping histograms show the full distribution. If the uploaded trace is shifted left, it's faster overall.
+- **ITL** — inter-token latency governs perceived streaming smoothness. Tighter, left-shifted = better.
+- **TTFT** — time-to-first-token affects perceived responsiveness. Lower = snappier first response.
+
+Re-export a trace from a different configuration (e.g. MIST) and upload it here to compare.
 """)
 
 
