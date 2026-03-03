@@ -49,7 +49,7 @@ def _ols(x: pd.Series, y: pd.Series, n=200):
 # ── Data loading ─────────────────────────────────────────────────────────────
 MODES = {
     "Streaming (Per-Token)": {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
-    "Streaming":             {"base": TRACES_DIR / "streaming", "suffix": "-streaming"},
+    "Streaming":             {"base": TRACES_DIR / "per-token", "suffix": "-streaming"},
     "Non-Streaming":         {"base": TRACES_DIR,               "suffix": ""},
 }
 
