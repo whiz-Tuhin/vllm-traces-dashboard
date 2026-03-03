@@ -156,11 +156,12 @@ tab_names = [
     "Overview",
     "Forward Pass Timeline",
     "Per-Request Deep Dive",
+    "Token Timeline",
     "Batching & Throughput",
     "Sanity Checks",
     "Raw Data",
 ]
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tab_names)
+tab1, tab2, tab3, tab_tl, tab4, tab5, tab6 = st.tabs(tab_names)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -783,6 +784,181 @@ The gap between the ITL line and the crosses is scheduler + Python overhead betw
 
     else:
         st.info("Per-token timeline is available in **Streaming** mode. Switch using the radio button above.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Token Timeline Tab — Gantt-style per-token view
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_tl:
+    st.subheader("Token Timeline")
+    st.markdown(
+        "Select a prompt to see a **Gantt-style timeline** of its entire lifecycle for both models side by side. "
+        "Each chart has three swim lanes: request phases, GPU forward passes, and individual token arrivals."
+    )
+
+    tl_prompt_ids = sorted(req_df["prompt_id"].dropna().unique())
+    tl_sel_idx = min(10, len(tl_prompt_ids) - 1)
+    tl_selected = st.selectbox("Prompt ID", tl_prompt_ids, index=tl_sel_idx, key="tl_prompt")
+
+    if not has_per_token or tok_df is None:
+        st.info("Token Timeline requires **Streaming** mode. Switch using the radio button above.")
+    else:
+        def _build_gantt(label, selected_prompt):
+            """Build a 3-lane Gantt figure for one model + one prompt."""
+            r = req_df[(req_df["model_label"] == label) & (req_df["prompt_id"] == selected_prompt)]
+            if r.empty:
+                return None, None
+            r = r.iloc[0]
+            rid = r["request_id"]
+
+            pt = tok_df[(tok_df["model_label"] == label) &
+                        (tok_df["request_id"] == rid)].sort_values("token_idx")
+            fwd = join_df[(join_df["model_label"] == label) &
+                          (join_df["request_id"] == rid)].sort_values("rel_start_s")
+
+            if pt.empty:
+                return None, None
+
+            # Time anchor: api_receive_ts for this request
+            t0 = r["api_receive_ts"]
+            sched_start = 0
+            sched_end   = (r["engine_add_request_ts"] - t0) * 1000
+            prefill_end = (r["first_token_ts"] - t0) * 1000
+            decode_end  = (r["completion_ts"] - t0) * 1000
+
+            # Y-axis lanes (bottom to top)
+            lanes = ["Tokens", "Fwd Passes", "Phases"]
+
+            fig = go.Figure()
+
+            # ── Lane 1: Phases ────────────────────────────────────────────
+            phase_data = [
+                ("Scheduling", sched_start, sched_end,   PHASE_CL["Scheduling"]),
+                ("Prefill",    sched_end,   prefill_end, PHASE_CL["Prefill"]),
+                ("Decode",     prefill_end, decode_end,  PHASE_CL["Decode"]),
+            ]
+            for pname, ps, pe, pcol in phase_data:
+                dur = pe - ps
+                fig.add_trace(go.Bar(
+                    x=[dur], y=["Phases"], base=[ps], orientation="h",
+                    name=pname, marker_color=pcol, width=0.6,
+                    text=f"{pname} ({dur:.0f} ms)" if dur > decode_end * 0.03 else "",
+                    textposition="inside", insidetextanchor="middle",
+                    textfont=dict(size=10, color="white"),
+                    showlegend=False,
+                    hovertemplate=f"<b>{pname}</b><br>{dur:.0f} ms<extra></extra>"))
+
+            # ── Lane 2: Forward Passes ────────────────────────────────────
+            if not fwd.empty:
+                for i, (_, fw) in enumerate(fwd.iterrows()):
+                    fwd_start_ms = (fw["rel_start_s"]) * 1000
+                    fwd_dur      = fw["duration_ms"]
+                    is_prefill   = (i == 0)
+                    fcol = PHASE_CL["Prefill"] if is_prefill else PHASE_CL["Decode"]
+                    fig.add_trace(go.Bar(
+                        x=[fwd_dur], y=["Fwd Passes"], base=[fwd_start_ms],
+                        orientation="h", marker_color=fcol, width=0.6,
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>{'Prefill' if is_prefill else 'Decode'} fwd</b><br>"
+                            f"Start: {fwd_start_ms:.1f} ms<br>"
+                            f"Duration: {fwd_dur:.1f} ms<br>"
+                            f"Batch size: {fw['batch_size']}<br>"
+                            f"Tokens: {fw['tokens_in_pass']}<br>"
+                            f"fwd_id: {fw['fwd_id']}<extra></extra>"
+                        )))
+
+            # ── Lane 3: Token markers ─────────────────────────────────────
+            decode_itl = pt[pt["token_idx"] > 0]["itl_ms"]
+            if not decode_itl.empty:
+                med_itl = decode_itl.median()
+                p95_itl = decode_itl.quantile(0.95)
+            else:
+                med_itl, p95_itl = 0, 0
+
+            # Offset token rel_ts_ms to account for TTFT
+            # token rel_ts_ms is relative to first_token_ts, so add prefill_end
+            token_x  = pt["rel_ts_ms"].values + prefill_end
+            token_itl = pt["itl_ms"].values
+
+            colors = []
+            for idx, itl_val in enumerate(token_itl):
+                if idx == 0:
+                    colors.append(PHASE_CL["Prefill"])
+                elif itl_val <= med_itl:
+                    colors.append("#2ECC71")
+                elif itl_val <= p95_itl:
+                    colors.append("#F39C12")
+                else:
+                    colors.append("#E74C3C")
+
+            fig.add_trace(go.Scatter(
+                x=token_x,
+                y=["Tokens"] * len(token_x),
+                mode="markers",
+                marker=dict(color=colors, size=6, symbol="line-ns",
+                            line=dict(width=2, color=colors)),
+                showlegend=False,
+                customdata=list(zip(pt["token_idx"], pt["itl_ms"].round(2), pt["rel_ts_ms"].round(1))),
+                hovertemplate=(
+                    "Token #%{customdata[0]}<br>"
+                    "ITL: %{customdata[1]} ms<br>"
+                    "Time: %{x:.1f} ms<extra></extra>"
+                )))
+
+            fig.update_layout(
+                barmode="stack",
+                xaxis_title="Time since request start (ms)",
+                yaxis=dict(categoryorder="array", categoryarray=lanes),
+                height=300,
+                margin=dict(l=80, r=20, t=40, b=50),
+                title=dict(text=label, font=dict(size=14)),
+                showlegend=False,
+            )
+
+            # Summary metrics
+            metrics = {
+                "Tokens": int(r["output_tokens"]),
+                "TTFT": f"{r['ttft_ms']:.1f} ms",
+                "Median ITL": f"{med_itl:.1f} ms",
+                "p95 ITL": f"{p95_itl:.1f} ms",
+                "Max ITL": f"{decode_itl.max():.1f} ms" if not decode_itl.empty else "–",
+                "E2E": f"{r['total_latency_ms']:.0f} ms",
+            }
+            return fig, metrics
+
+        col_l, col_r = st.columns(2)
+        model_list = list(MODELS.keys())
+
+        for col, label in zip([col_l, col_r], model_list):
+            with col:
+                fig, metrics = _build_gantt(label, tl_selected)
+                if fig is None:
+                    st.warning(f"No data for {label} / {tl_selected}")
+                    continue
+                mc = st.columns(len(metrics))
+                for i, (k, v) in enumerate(metrics.items()):
+                    mc[i].metric(k, v)
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Colour legend
+        leg1, leg2, leg3 = st.columns(3)
+        leg1.markdown("**Phases:** 🟡 Scheduling  🟢 Prefill  🟣 Decode")
+        leg2.markdown("**Fwd Passes:** 🟢 Prefill fwd  🟣 Decode fwd")
+        leg3.markdown("**Tokens:** 🟢 Fast (≤ p50)  🟡 Normal (p50–p95)  🔴 Slow (> p95)")
+
+        _note("""
+**Three swim lanes per model:**
+
+- **Phases** (top) — the three lifecycle stages as coloured bars: Scheduling (yellow), Prefill (green), Decode (purple).
+- **Fwd Passes** (middle) — each GPU forward pass as a bar. The first (wide) bar is the prefill pass; subsequent narrow bars are decode passes. Width = GPU execution time. Hover for batch size and token count.
+- **Tokens** (bottom) — each tick mark is one generated token, placed at the exact time it was emitted to the client. Colour indicates speed: green = fast (ITL ≤ median), yellow = normal (median–p95), red = slow (> p95).
+
+**How to read it:**
+- Dense, green tick marks = smooth, fast streaming.
+- Gaps or red ticks = the user experienced a stutter (usually caused by a prefill for another request or a batch-size change).
+- Compare left (Llama) vs right (Qwen) to see which model delivers tokens more consistently.
+""")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
