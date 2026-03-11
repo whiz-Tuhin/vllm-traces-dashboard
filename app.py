@@ -303,9 +303,10 @@ tab_names = [
     "Batching & Throughput",
     "Sanity Checks",
     "Export / Compare",
+    "Fwd Pass Comparison",
     "Raw Data",
 ]
-tab1, tab2, tab3, tab_tl, tab4, tab5, tab_ec, tab6 = st.tabs(tab_names)
+tab1, tab2, tab3, tab_tl, tab4, tab5, tab_ec, tab_fwd_cmp, tab6 = st.tabs(tab_names)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1504,6 +1505,239 @@ with tab_ec:
 
 Re-export a trace from a different configuration (e.g. MIST) and upload it here to compare.
 """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tab — Fwd Pass Comparison
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_fwd_cmp:
+    st.subheader("Forward Pass Comparison")
+    st.markdown("""
+Compare two forward-pass traces side by side.  Useful for comparing different
+runs of the same model/hw/input (vLLM vs vLLM, vLLM vs MIST, vLLM vs SGLang).
+Forward passes exceeding the difference threshold are highlighted.
+""")
+
+    # ── Helper: load a fwd JSONL into a DataFrame ────────────────────────────
+    def _load_fwd_jsonl(source) -> pd.DataFrame:
+        """Load fwd JSONL from a file path (str/Path) or uploaded file object."""
+        rows = []
+        if isinstance(source, (str, Path)):
+            with open(source) as f:
+                for line in f:
+                    rows.append(json.loads(line))
+        else:
+            for line in source:
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8")
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+        df = pd.DataFrame(rows)
+        if "batch_size" not in df.columns and "req_ids" in df.columns:
+            df["batch_size"] = df["req_ids"].apply(len)
+        return df
+
+    # ── Discover existing fwd traces ─────────────────────────────────────────
+    existing_fwd_files = {}
+    for d in [TRACES_DIR, TRACES_DIR / "per-token", TRACES_DIR / "streaming"]:
+        if d.is_dir():
+            for p in sorted(d.glob("*_fwd.jsonl")):
+                existing_fwd_files[f"{p.parent.name}/{p.name}" if p.parent != TRACES_DIR else p.name] = p
+
+    # ── File selection ───────────────────────────────────────────────────────
+    src_col1, src_col2 = st.columns(2)
+    df_a, df_b = None, None
+    label_a, label_b = "Run A", "Run B"
+
+    with src_col1:
+        st.markdown("**Run A**")
+        src_a = st.radio("Source A", ["Existing trace", "Upload file"], key="src_a", horizontal=True)
+        if src_a == "Existing trace" and existing_fwd_files:
+            sel_a = st.selectbox("Select trace A", list(existing_fwd_files.keys()), key="sel_a")
+            if sel_a:
+                df_a = _load_fwd_jsonl(existing_fwd_files[sel_a])
+                label_a = sel_a
+        else:
+            up_a = st.file_uploader("Upload fwd JSONL (A)", type=["jsonl"], key="up_a")
+            if up_a is not None:
+                df_a = _load_fwd_jsonl(up_a)
+                label_a = up_a.name
+        label_a = st.text_input("Label A", value=label_a, key="lbl_a")
+
+    with src_col2:
+        st.markdown("**Run B**")
+        src_b = st.radio("Source B", ["Existing trace", "Upload file"], key="src_b", horizontal=True)
+        if src_b == "Existing trace" and existing_fwd_files:
+            sel_b = st.selectbox("Select trace B", list(existing_fwd_files.keys()), key="sel_b",
+                                 index=min(1, len(existing_fwd_files) - 1))
+            if sel_b:
+                df_b = _load_fwd_jsonl(existing_fwd_files[sel_b])
+                label_b = sel_b
+        else:
+            up_b = st.file_uploader("Upload fwd JSONL (B)", type=["jsonl"], key="up_b")
+            if up_b is not None:
+                df_b = _load_fwd_jsonl(up_b)
+                label_b = up_b.name
+        label_b = st.text_input("Label B", value=label_b, key="lbl_b")
+
+    if df_a is not None and df_b is not None:
+        # ── Config ───────────────────────────────────────────────────────────
+        cfg_col1, cfg_col2 = st.columns(2)
+        with cfg_col1:
+            threshold = st.slider("Difference threshold (ms)", 0.0, 20.0, 2.0, 0.5, key="cmp_thresh")
+        with cfg_col2:
+            align_method = st.radio("Alignment method",
+                                    ["By fwd_id (index)", "By batch composition (Jaccard)"],
+                                    key="cmp_align", horizontal=True)
+
+        # ── Alignment ────────────────────────────────────────────────────────
+        if align_method == "By fwd_id (index)":
+            n = min(len(df_a), len(df_b))
+            if len(df_a) != len(df_b):
+                st.warning(f"Different fwd pass counts: {label_a}={len(df_a)}, {label_b}={len(df_b)}. "
+                           f"Truncating to first {n} passes.")
+            merged = pd.DataFrame({
+                "idx": range(n),
+                "fwd_id_a": df_a["fwd_id"].iloc[:n].values,
+                "fwd_id_b": df_b["fwd_id"].iloc[:n].values,
+                "duration_a": df_a["duration_ms"].iloc[:n].values,
+                "duration_b": df_b["duration_ms"].iloc[:n].values,
+                "batch_size_a": df_a["batch_size"].iloc[:n].values,
+                "batch_size_b": df_b["batch_size"].iloc[:n].values,
+            })
+        else:
+            # Jaccard-based alignment: match each fwd pass in A to best match in B
+            def _jaccard(s1, s2):
+                s1, s2 = set(s1), set(s2)
+                inter = len(s1 & s2)
+                union = len(s1 | s2)
+                return inter / union if union > 0 else 0.0
+
+            matches = []
+            used_b = set()
+            for i, row_a in df_a.iterrows():
+                best_j, best_score = -1, -1.0
+                ids_a = row_a.get("req_ids", [])
+                for j, row_b in df_b.iterrows():
+                    if j in used_b:
+                        continue
+                    score = _jaccard(ids_a, row_b.get("req_ids", []))
+                    if score > best_score:
+                        best_score = score
+                        best_j = j
+                if best_j >= 0 and best_score > 0:
+                    used_b.add(best_j)
+                    matches.append((i, best_j, best_score))
+
+            if not matches:
+                st.error("No matching forward passes found by batch composition. "
+                         "The traces may use different request IDs.")
+                st.stop()
+
+            merged = pd.DataFrame({
+                "idx": range(len(matches)),
+                "fwd_id_a": [df_a.loc[m[0], "fwd_id"] for m in matches],
+                "fwd_id_b": [df_b.loc[m[1], "fwd_id"] for m in matches],
+                "duration_a": [df_a.loc[m[0], "duration_ms"] for m in matches],
+                "duration_b": [df_b.loc[m[1], "duration_ms"] for m in matches],
+                "batch_size_a": [df_a.loc[m[0], "batch_size"] for m in matches],
+                "batch_size_b": [df_b.loc[m[1], "batch_size"] for m in matches],
+                "jaccard": [m[2] for m in matches],
+            })
+            st.info(f"Matched {len(matches)} forward passes by batch composition. "
+                    f"Mean Jaccard similarity: {merged['jaccard'].mean():.2f}")
+
+        merged["diff_ms"] = merged["duration_a"] - merged["duration_b"]
+        merged["abs_diff_ms"] = merged["diff_ms"].abs()
+        merged["exceeds"] = merged["abs_diff_ms"] > threshold
+
+        # ── Summary metrics ──────────────────────────────────────────────────
+        n_exceed = merged["exceeds"].sum()
+        pct_exceed = 100 * n_exceed / len(merged) if len(merged) > 0 else 0
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Matched Passes", len(merged))
+        m2.metric("Exceeding Threshold", f"{n_exceed} ({pct_exceed:.1f}%)")
+        m3.metric("Mean |diff|", f"{merged['abs_diff_ms'].mean():.2f} ms")
+        m4.metric("Max |diff|", f"{merged['abs_diff_ms'].max():.2f} ms")
+        m5.metric("Median |diff|", f"{merged['abs_diff_ms'].median():.2f} ms")
+
+        # ── Dual bar chart ───────────────────────────────────────────────────
+        st.subheader("Duration Comparison")
+        fig_bars = go.Figure()
+        fig_bars.add_trace(go.Bar(
+            x=merged["idx"], y=merged["duration_a"],
+            name=label_a, marker_color="#636EFA",
+        ))
+        fig_bars.add_trace(go.Bar(
+            x=merged["idx"], y=merged["duration_b"],
+            name=label_b, marker_color="#EF553B",
+        ))
+        # Highlight exceeding passes
+        for _, row in merged[merged["exceeds"]].iterrows():
+            fig_bars.add_vrect(
+                x0=row["idx"] - 0.5, x1=row["idx"] + 0.5,
+                fillcolor="red", opacity=0.08, line_width=0,
+            )
+        fig_bars.update_layout(
+            barmode="group", xaxis_title="Forward Pass Index",
+            yaxis_title="Duration (ms)", height=450,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig_bars, use_container_width=True)
+
+        # ── Difference timeline ──────────────────────────────────────────────
+        st.subheader("Difference Timeline")
+        fig_diff = go.Figure()
+        # Threshold band
+        fig_diff.add_hrect(y0=-threshold, y1=threshold,
+                           fillcolor="green", opacity=0.1, line_width=0)
+        fig_diff.add_hline(y=threshold, line_dash="dash", line_color="green",
+                           opacity=0.5, annotation_text=f"+{threshold}ms")
+        fig_diff.add_hline(y=-threshold, line_dash="dash", line_color="green",
+                           opacity=0.5, annotation_text=f"-{threshold}ms")
+        fig_diff.add_hline(y=0, line_color="gray", opacity=0.3)
+        # Points
+        colors = ["red" if e else "#636EFA" for e in merged["exceeds"]]
+        fig_diff.add_trace(go.Scatter(
+            x=merged["idx"], y=merged["diff_ms"],
+            mode="markers", marker=dict(color=colors, size=5),
+            name="diff (A - B)",
+            hovertemplate="idx=%{x}<br>diff=%{y:.2f}ms<extra></extra>",
+        ))
+        fig_diff.update_layout(
+            xaxis_title="Forward Pass Index",
+            yaxis_title=f"Diff: {label_a} - {label_b} (ms)",
+            height=350,
+        )
+        st.plotly_chart(fig_diff, use_container_width=True)
+
+        # ── Detail table ─────────────────────────────────────────────────────
+        st.subheader("Detailed Comparison")
+        show_cols = ["idx", "fwd_id_a", "fwd_id_b", "duration_a", "duration_b",
+                     "diff_ms", "abs_diff_ms", "batch_size_a", "batch_size_b", "exceeds"]
+        if "jaccard" in merged.columns:
+            show_cols.append("jaccard")
+
+        def _highlight_exceeds(row):
+            if row["exceeds"]:
+                return ["background-color: #ffcccc"] * len(row)
+            return [""] * len(row)
+
+        styled = (merged[show_cols]
+                   .sort_values("abs_diff_ms", ascending=False)
+                   .style.apply(_highlight_exceeds, axis=1)
+                   .format({
+                       "duration_a": "{:.2f}", "duration_b": "{:.2f}",
+                       "diff_ms": "{:.2f}", "abs_diff_ms": "{:.2f}",
+                       **({} if "jaccard" not in merged.columns else {"jaccard": "{:.2f}"}),
+                   }))
+        st.dataframe(styled, use_container_width=True, height=400)
+
+    elif df_a is None and df_b is None:
+        st.info("Select or upload two forward-pass trace files to compare.")
+    else:
+        st.warning("Please provide both Run A and Run B traces.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
