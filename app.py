@@ -1540,7 +1540,7 @@ Forward passes exceeding the difference threshold are highlighted.
 
     # ── Discover existing fwd traces ─────────────────────────────────────────
     existing_fwd_files = {}
-    for d in [TRACES_DIR, TRACES_DIR / "per-token", TRACES_DIR / "streaming"]:
+    for d in [TRACES_DIR, TRACES_DIR / "per-token", TRACES_DIR / "streaming", TRACES_DIR / "multiturn"]:
         if d.is_dir():
             for p in sorted(d.glob("*_fwd.jsonl")):
                 existing_fwd_files[f"{p.parent.name}/{p.name}" if p.parent != TRACES_DIR else p.name] = p
