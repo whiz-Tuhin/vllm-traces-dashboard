@@ -1,7 +1,8 @@
 import { get } from '@vercel/blob';
 
-export async function GET({ params }: { params: { path: string } }) {
-	const path = params.path;
+export async function GET({ params }: { params: { path: string } | Promise<{ path: string }> }) {
+	const resolved = await params;
+	const path = resolved.path;
 	if (!path) {
 		return new Response(JSON.stringify({ error: 'Missing path' }), {
 			status: 400,

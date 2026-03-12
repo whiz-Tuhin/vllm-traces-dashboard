@@ -93,8 +93,7 @@ The Svelte dashboard in `dashboard-v2/` can load trace data from **Vercel Blob**
 
 2. **Environment variables** (Vercel project settings):
    - `BLOB_READ_WRITE_TOKEN` – Your Blob token (server-only; used by the API proxy)
-   - `PUBLIC_DATA_SOURCE=blob` – Tells the dashboard to fetch from the API proxy instead of static files
 
 3. **Deploy** – Deploy `dashboard-v2` to Vercel with root directory `dashboard-v2`.
 
-Without `PUBLIC_DATA_SOURCE=blob`, the dashboard uses static files from `/data/` (requires `static/data/` in the repo).
+The dashboard uses the Blob proxy (`/api/data/`) by default. For local dev with static files, set `PUBLIC_DATA_SOURCE=static` to use `/data/` instead.

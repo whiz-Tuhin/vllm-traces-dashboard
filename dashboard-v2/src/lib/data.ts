@@ -3,9 +3,9 @@ import type { TraceMode, TraceData, Meta } from './types';
 
 const cache = new Map<string, unknown>();
 
-/** Base path: /api/data when using Blob proxy, /data when using static files */
+/** Base path: /api/data (Blob proxy) by default; /data (static) only when PUBLIC_DATA_SOURCE=static */
 function getDataBase(): string {
-	return env.PUBLIC_DATA_SOURCE === 'blob' ? '/api/data' : '/data';
+	return env.PUBLIC_DATA_SOURCE === 'static' ? '/data' : '/api/data';
 }
 
 function dataUrl(relativePath: string): string {
@@ -15,6 +15,10 @@ function dataUrl(relativePath: string): string {
 async function fetchJson<T>(url: string): Promise<T> {
 	if (cache.has(url)) return cache.get(url) as T;
 	const res = await fetch(url);
+	if (!res.ok) {
+		const text = await res.text();
+		throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}${text ? ` - ${text.slice(0, 200)}` : ''}`);
+	}
 	const data = await res.json();
 	cache.set(url, data);
 	return data as T;
