@@ -1,0 +1,21 @@
+{
+  "models": [
+    "Llama-2-7b",
+    "Qwen2.5-7B"
+  ],
+  "modes": [
+    "non-streaming",
+    "streaming",
+    "multiturn"
+  ],
+  "colors": {
+    "Llama-2-7b": "#8FB8FF",
+    "Qwen2.5-7B": "#FF9B7A"
+  },
+  "phase_colors": {
+    "Scheduling": "#F4CD78",
+    "Queue/Other": "#7CD8F0",
+    "Prefill": "#7ED7AB",
+    "Decode": "#B495F5"
+  }
+}

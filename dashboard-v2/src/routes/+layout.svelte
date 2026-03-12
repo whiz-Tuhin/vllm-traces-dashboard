@@ -23,7 +23,6 @@
 	};
 
 	let uiTheme = $state<'dark' | 'light'>('dark');
-	let loadError = $state<string | null>(null);
 
 	function applyTheme(theme: 'dark' | 'light') {
 		uiTheme = theme;
@@ -37,20 +36,14 @@
 
 	async function switchMode(mode: TraceMode) {
 		$loading = true;
-		$loadError = null;
 		$currentMode = mode;
-		try {
-			const data = await loadTraceData(mode);
-			$traceData = data;
-			const tabs = $availableTabs;
-			if (!tabs.find(t => t.id === $currentTab)) {
-				$currentTab = tabs[0].id;
-			}
-		} catch (e) {
-			$loadError = e instanceof Error ? e.message : String(e);
-		} finally {
-			$loading = false;
+		const data = await loadTraceData(mode);
+		$traceData = data;
+		const tabs = $availableTabs;
+		if (!tabs.find(t => t.id === $currentTab)) {
+			$currentTab = tabs[0].id;
 		}
+		$loading = false;
 	}
 
 	onMount(async () => {
@@ -66,21 +59,15 @@
 		}
 
 		$loading = true;
-		$loadError = null;
-		try {
-			const m = await loadMeta();
-			$meta = m;
-			await switchMode('streaming');
-		} catch (e) {
-			$loadError = e instanceof Error ? e.message : String(e);
-			$loading = false;
-		}
+		const m = await loadMeta();
+		$meta = m;
+		await switchMode('streaming');
 	});
 </script>
 
 <div class="flex h-screen overflow-hidden" style="background: var(--surface-base);">
-	<!-- Sidebar - z-index ensures it stays clickable above any overlay -->
-	<aside class="w-[260px] flex flex-col shrink-0 relative z-10" style="background: var(--surface-raised); border-right: 1px solid var(--border-subtle);">
+	<!-- Sidebar -->
+	<aside class="w-[260px] flex flex-col shrink-0" style="background: var(--surface-raised); border-right: 1px solid var(--border-subtle);">
 		<!-- Logo -->
 		<div class="px-6 py-5" style="border-bottom: 1px solid var(--border-subtle);">
 			<div class="flex items-center gap-3">
@@ -100,9 +87,8 @@
 			<div class="mt-3 flex flex-col gap-1">
 				{#each Object.entries(modeLabels) as [key, info]}
 					<button
-						type="button"
 						onclick={() => switchMode(key as TraceMode)}
-						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all cursor-pointer w-full text-left"
+						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all"
 						style={$currentMode === key
 							? `background: var(--accent-subtle); color: var(--accent-primary); border: 1px solid rgba(124,147,219,0.18);`
 							: `color: var(--text-secondary); border: 1px solid transparent;`}
@@ -124,9 +110,8 @@
 			<div class="mt-3 flex flex-col gap-0.5">
 				{#each $availableTabs as tab}
 					<button
-						type="button"
 						onclick={() => $currentTab = tab.id}
-						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all cursor-pointer w-full text-left"
+						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all"
 						style={$currentTab === tab.id
 							? `background: var(--surface-overlay); color: var(--text-primary); font-weight: 500;`
 							: `color: var(--text-secondary);`}
@@ -170,37 +155,12 @@
 
 	<!-- Main Content -->
 	<main class="flex-1 overflow-y-auto" style="background: var(--surface-base);">
-		{#if $loadError}
-			<div class="flex flex-col items-center justify-center h-full gap-4 p-8">
-				<div class="text-[0.9rem] font-medium" style="color: var(--color-error, #e5534b);">Failed to load traces</div>
-				<p class="text-[0.8rem] text-center max-w-md" style="color: var(--text-muted);">{$loadError}</p>
-				<p class="text-[0.7rem] text-center max-w-md" style="color: var(--text-muted);">
-					If using Blob: ensure BLOB_READ_WRITE_TOKEN is set, the Blob store is linked to this project, and files are at data/meta.json, data/streaming/requests.json, etc.
-				</p>
-				<button
-					class="px-4 py-2 rounded-lg text-[0.8rem] font-medium"
-					style="background: var(--accent-subtle); color: var(--accent-primary); border: 1px solid rgba(124,147,219,0.3);"
-					onclick={async () => {
-						$loadError = null;
-						$loading = true;
-						try {
-							const m = await loadMeta();
-							$meta = m;
-							await switchMode('streaming');
-						} catch (e) {
-							$loadError = e instanceof Error ? e.message : String(e);
-						} finally {
-							$loading = false;
-						}
-					}}
-				>
-					Retry
-				</button>
-			</div>
-		{:else if $loading}
-			<div class="flex flex-col items-center justify-center h-full gap-4">
-				<div class="w-9 h-9 rounded-full animate-spin" style="border: 2px solid var(--border-default); border-top-color: var(--accent-primary);"></div>
-				<span class="text-[0.8rem] font-medium" style="color: var(--text-muted);">Loading traces...</span>
+		{#if $loading}
+			<div class="flex items-center justify-center h-full">
+				<div class="flex flex-col items-center gap-4">
+					<div class="w-9 h-9 rounded-full animate-spin" style="border: 2px solid var(--border-default); border-top-color: var(--accent-primary);"></div>
+					<span class="text-[0.8rem] font-medium" style="color: var(--text-muted);">Loading traces...</span>
+				</div>
 			</div>
 		{:else}
 			{@render children()}
