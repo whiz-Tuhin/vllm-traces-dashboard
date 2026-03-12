@@ -1,0 +1,112 @@
+@import 'tailwindcss';
+
+:root {
+  /* Model series — brighter for dark-chart contrast */
+  --color-series-a: #8FB8FF;
+  --color-series-b: #FF9B7A;
+
+  /* Phase colors — desaturated, enterprise-grade */
+  --color-scheduling: #F4CD78;
+  --color-queue: #7CD8F0;
+  --color-prefill: #7ED7AB;
+  --color-decode: #B495F5;
+
+  /* Surfaces */
+  --surface-base: #0F1117;
+  --surface-raised: #161922;
+  --surface-overlay: #1C2030;
+  --surface-hover: #232838;
+
+  /* Borders */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.09);
+
+  /* Text */
+  --text-primary: #E8EAF0;
+  --text-secondary: #9BA1B0;
+  --text-muted: #636B7E;
+
+  /* Accent */
+  --accent-primary: #8FB8FF;
+  --accent-primary-hover: #A4C6FF;
+  --accent-subtle: rgba(143, 184, 255, 0.14);
+
+  /* Status */
+  --color-success: #7ED7AB;
+  --color-warning: #F4CD78;
+  --color-danger: #FF9B7A;
+}
+
+/* Light mode overrides */
+[data-theme="light"] {
+  --surface-base: #F5F7FB;
+  --surface-raised: #FFFFFF;
+  --surface-overlay: #EEF2F8;
+  --surface-hover: #E7ECF5;
+
+  --border-subtle: rgba(17, 24, 39, 0.08);
+  --border-default: rgba(17, 24, 39, 0.14);
+
+  --text-primary: #111827;
+  --text-secondary: #344054;
+  --text-muted: #667085;
+
+  --accent-primary: #4777E6;
+  --accent-primary-hover: #5B87EA;
+  --accent-subtle: rgba(71, 119, 230, 0.12);
+
+  --color-success: #1F8A5B;
+  --color-warning: #C98914;
+  --color-danger: #CC5A3E;
+}
+
+html {
+  scroll-behavior: smooth;
+  font-size: 15px;
+}
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--surface-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+/* Selection */
+::selection {
+  background: rgba(124, 147, 219, 0.3);
+}
+
+/* Input range styling */
+input[type="range"] {
+  accent-color: var(--accent-primary);
+}
+
+/* Select styling */
+select {
+  background-color: var(--surface-raised);
+  border-color: var(--border-default);
+}
+select:focus {
+  border-color: var(--accent-primary);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
