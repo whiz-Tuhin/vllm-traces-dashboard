@@ -79,8 +79,8 @@
 </script>
 
 <div class="flex h-screen overflow-hidden" style="background: var(--surface-base);">
-	<!-- Sidebar -->
-	<aside class="w-[260px] flex flex-col shrink-0" style="background: var(--surface-raised); border-right: 1px solid var(--border-subtle);">
+	<!-- Sidebar - z-index ensures it stays clickable above any overlay -->
+	<aside class="w-[260px] flex flex-col shrink-0 relative z-10" style="background: var(--surface-raised); border-right: 1px solid var(--border-subtle);">
 		<!-- Logo -->
 		<div class="px-6 py-5" style="border-bottom: 1px solid var(--border-subtle);">
 			<div class="flex items-center gap-3">
@@ -100,8 +100,9 @@
 			<div class="mt-3 flex flex-col gap-1">
 				{#each Object.entries(modeLabels) as [key, info]}
 					<button
+						type="button"
 						onclick={() => switchMode(key as TraceMode)}
-						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all"
+						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all cursor-pointer w-full text-left"
 						style={$currentMode === key
 							? `background: var(--accent-subtle); color: var(--accent-primary); border: 1px solid rgba(124,147,219,0.18);`
 							: `color: var(--text-secondary); border: 1px solid transparent;`}
@@ -123,8 +124,9 @@
 			<div class="mt-3 flex flex-col gap-0.5">
 				{#each $availableTabs as tab}
 					<button
+						type="button"
 						onclick={() => $currentTab = tab.id}
-						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all"
+						class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-[0.8rem] transition-all cursor-pointer w-full text-left"
 						style={$currentTab === tab.id
 							? `background: var(--surface-overlay); color: var(--text-primary); font-weight: 500;`
 							: `color: var(--text-secondary);`}
