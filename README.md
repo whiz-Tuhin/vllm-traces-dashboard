@@ -80,3 +80,21 @@ Opens at **http://localhost:8501**.
 | `req_ids` | list | Request IDs in this batch |
 | `num_tokens` | dict | `{request_id: tokens_processed}` |
 | `total_tokens` | int | Sum of tokens across all requests |
+
+---
+
+## Dashboard v2 (Svelte) – Vercel deployment with Blob
+
+The Svelte dashboard in `dashboard-v2/` can load trace data from **Vercel Blob** (private storage).
+
+### Setup
+
+1. **Upload traces to Blob** – Upload the contents of `dashboard-v2/static/data/` to your Blob store, keeping the same paths (e.g. `data/meta.json`, `data/streaming/requests.json`).
+
+2. **Environment variables** (Vercel project settings):
+   - `BLOB_READ_WRITE_TOKEN` – Your Blob token (server-only; used by the API proxy)
+   - `PUBLIC_DATA_SOURCE=blob` – Tells the dashboard to fetch from the API proxy instead of static files
+
+3. **Deploy** – Deploy `dashboard-v2` to Vercel with root directory `dashboard-v2`.
+
+Without `PUBLIC_DATA_SOURCE=blob`, the dashboard uses static files from `/data/` (requires `static/data/` in the repo).
